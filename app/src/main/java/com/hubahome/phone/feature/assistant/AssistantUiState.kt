@@ -16,6 +16,7 @@ data class AssistantMessage(
 data class AssistantUiState(
     val sessionStatus: VoiceSessionStatus = VoiceSessionStatus.IDLE,
     val isConnected: Boolean = false,
+    val voicePhase: String = "Idle",
     val transcriptInput: String = "",
     val messages: List<AssistantMessage> = emptyList(),
     val lastError: String? = null,

@@ -6,6 +6,17 @@ import java.nio.ByteOrder
 import java.util.Base64
 
 object WavCodec {
+    fun pcm16FromShortArray(samples: ShortArray): ByteArray {
+        val bytes = ByteArray(samples.size * 2)
+        var offset = 0
+        for (sample in samples) {
+            bytes[offset] = (sample.toInt() and 0xFF).toByte()
+            bytes[offset + 1] = ((sample.toInt() shr 8) and 0xFF).toByte()
+            offset += 2
+        }
+        return bytes
+    }
+
     fun pcm16MonoToWav(
         pcm: ByteArray,
         sampleRate: Int = 16_000,
@@ -33,6 +44,20 @@ object WavCodec {
         out.write(intLe(dataSize))
         out.write(pcm)
         return out.toByteArray()
+    }
+
+    fun pcm16MonoToWav(
+        pcm: ShortArray,
+        sampleRate: Int = 16_000,
+        channels: Short = 1,
+        bitsPerSample: Short = 16,
+    ): ByteArray {
+        return pcm16MonoToWav(
+            pcm = pcm16FromShortArray(pcm),
+            sampleRate = sampleRate,
+            channels = channels,
+            bitsPerSample = bitsPerSample,
+        )
     }
 
     fun wavToPcm16(wav: ByteArray): ByteArray {

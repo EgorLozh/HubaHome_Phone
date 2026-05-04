@@ -1,7 +1,7 @@
 package com.hubahome.phone.core.audio
 
 interface AudioChunkRecorder {
-    fun start(onChunkBase64Wav: (String) -> Unit)
-    fun stop()
+    fun start()
+    fun stop(): String?
     val isRecording: Boolean
 }

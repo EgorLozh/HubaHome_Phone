@@ -14,14 +14,16 @@ Android-native MVP client for `HubaHome_Server`.
   - reconnect with bounded backoff,
   - session status transitions.
 - Voice flow:
+  - local wakeword detection via `huba_ru_v3.onnx`,
+  - local ready beep in app,
   - send `wakeword_detected`,
-  - stream microphone chunks as `audio_chunk` (WAV/base64),
-  - send `final_transcript` (manual text or empty trigger after voice capture).
+  - send one final utterance as `audio_chunk` (WAV/base64),
+  - send empty `final_transcript` to trigger server-side STT.
 - Response handling:
   - `assistant_text` in UI,
   - `assistant_audio_chunk` playback via `AudioTrack`,
   - server/client error rendering.
-- Real wakeword detector (SpeechRecognizer-based keyword spotting for `хуба` / `huba`).
+- Real wakeword detector backed by ONNX Runtime and openWakeWord-compatible preprocessing assets.
 - Foreground service scaffold for lifecycle hardening.
 
 ## Configure server endpoint
@@ -40,3 +42,10 @@ Default values are still provided at first launch and target local backend from 
 ## Server note
 
 `HubaHome_Server` already supports API key in WebSocket handshake (`x-api-key` header or `api_key` query).
+
+## Wakeword model assets
+
+Wakeword runtime assets are bundled from the standalone lab project:
+
+- `../HubaHome_Wakeword_Lab/models/huba_ru_v3.onnx`
+- plus shared openWakeWord preprocessing models (`melspectrogram.onnx`, `embedding_model.onnx`) in app assets

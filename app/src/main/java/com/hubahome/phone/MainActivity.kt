@@ -127,6 +127,10 @@ private fun AssistantScreen(
             text = "Session: ${uiState.sessionStatus}",
             style = MaterialTheme.typography.titleMedium,
         )
+        Text(
+            text = "Voice: ${uiState.voicePhase}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
 
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),
@@ -178,7 +182,7 @@ private fun AssistantScreen(
                 onCheckedChange = onToggleWakeword,
             )
             Button(
-                enabled = hasAudioPermission && !uiState.isRecording,
+                enabled = hasAudioPermission && uiState.isConnected && !uiState.isRecording,
                 onClick = onStartCapture,
             ) {
                 Text("Start mic")

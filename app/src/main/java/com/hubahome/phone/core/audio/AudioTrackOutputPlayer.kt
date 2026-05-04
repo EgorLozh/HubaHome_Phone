@@ -20,12 +20,12 @@ import kotlinx.coroutines.launch
 @Singleton
 class AudioTrackOutputPlayer @Inject constructor() : AudioOutputPlayer {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val queue = LinkedBlockingQueue<String>()
+    private val queue = LinkedBlockingQueue<PlaybackRequest>()
     private val isPlaying = AtomicBoolean(false)
     private var playJob: Job? = null
 
-    override fun playBase64Wav(base64Wav: String) {
-        queue.offer(base64Wav)
+    override fun playBase64Wav(base64Wav: String, onComplete: (() -> Unit)?) {
+        queue.offer(PlaybackRequest(base64Wav = base64Wav, onComplete = onComplete))
         if (!isPlaying.get()) {
             startLoop()
         }
@@ -42,9 +42,9 @@ class AudioTrackOutputPlayer @Inject constructor() : AudioOutputPlayer {
         if (isPlaying.getAndSet(true)) return
         playJob = scope.launch {
             while (isActive) {
-                val base64 = queue.take()
+                val request = queue.take()
                 runCatching {
-                    val wav = WavCodec.base64ToWav(base64)
+                    val wav = WavCodec.base64ToWav(request.base64Wav)
                     val pcm = WavCodec.wavToPcm16(wav)
                     if (pcm.isNotEmpty()) {
                         playPcm16(pcm)
@@ -52,6 +52,7 @@ class AudioTrackOutputPlayer @Inject constructor() : AudioOutputPlayer {
                 }.onFailure { error ->
                     Log.e(TAG, "Playback failed", error)
                 }
+                request.onComplete?.invoke()
                 if (queue.isEmpty()) {
                     isPlaying.set(false)
                     break
@@ -97,4 +98,9 @@ class AudioTrackOutputPlayer @Inject constructor() : AudioOutputPlayer {
         private const val SAMPLE_RATE = 16_000
         private const val MIN_BUFFER = 4096
     }
+
+    private data class PlaybackRequest(
+        val base64Wav: String,
+        val onComplete: (() -> Unit)?,
+    )
 }

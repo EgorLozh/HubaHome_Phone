@@ -4,6 +4,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -14,15 +15,19 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 @Singleton
 class PcmAudioChunkRecorder @Inject constructor() : AudioChunkRecorder {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var recordJob: Job? = null
     private val recording = AtomicBoolean(false)
+    private val pcmLock = Any()
+    private var recorder: AudioRecord? = null
+    private var pcmBuffer = ByteArrayOutputStream()
     override val isRecording: Boolean get() = recording.get()
 
-    override fun start(onChunkBase64Wav: (String) -> Unit) {
+    override fun start() {
         if (recording.get()) return
         val minBufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
@@ -41,6 +46,15 @@ class PcmAudioChunkRecorder @Inject constructor() : AudioChunkRecorder {
             AudioFormat.ENCODING_PCM_16BIT,
             minBufferSize * 2,
         )
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord initialization failed")
+            recorder.release()
+            return
+        }
+        synchronized(pcmLock) {
+            pcmBuffer = ByteArrayOutputStream()
+        }
+        this.recorder = recorder
         recorder.startRecording()
         recording.set(true)
 
@@ -49,21 +63,31 @@ class PcmAudioChunkRecorder @Inject constructor() : AudioChunkRecorder {
             while (isActive && recording.get()) {
                 val read = recorder.read(chunkBuffer, 0, chunkBuffer.size)
                 if (read <= 0) continue
-                val pcm = if (read == chunkBuffer.size) chunkBuffer else chunkBuffer.copyOf(read)
-                val wav = WavCodec.pcm16MonoToWav(pcm, sampleRate = SAMPLE_RATE)
-                onChunkBase64Wav(WavCodec.wavToBase64(wav))
-            }
-            runCatching {
-                recorder.stop()
-                recorder.release()
+                synchronized(pcmLock) {
+                    pcmBuffer.write(chunkBuffer, 0, read)
+                }
             }
         }
     }
 
-    override fun stop() {
+    override fun stop(): String? {
         recording.set(false)
+        runCatching { recorder?.stop() }
+        runBlocking { recordJob?.join() }
+        runCatching { recorder?.release() }
+        recorder = null
         recordJob?.cancel()
         recordJob = null
+
+        val pcm = synchronized(pcmLock) {
+            val captured = pcmBuffer.toByteArray()
+            pcmBuffer.reset()
+            captured
+        }
+        if (pcm.isEmpty()) return null
+
+        val wav = WavCodec.pcm16MonoToWav(pcm, sampleRate = SAMPLE_RATE)
+        return WavCodec.wavToBase64(wav)
     }
 
     @Suppress("unused")

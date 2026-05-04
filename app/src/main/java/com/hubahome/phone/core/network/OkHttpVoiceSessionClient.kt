@@ -80,6 +80,7 @@ class OkHttpVoiceSessionClient @Inject constructor(
         val payload = WakewordDetectedEvent(correlationId = sessionCorrelationId)
         webSocket?.send(json.encodeToString(payload)) ?: run {
             _events.tryEmit(IncomingServerEvent.Error("Socket is not connected", sessionCorrelationId))
+            return
         }
         _status.value = VoiceSessionStatus.LISTENING
     }
@@ -106,7 +107,6 @@ class OkHttpVoiceSessionClient @Inject constructor(
         override fun onOpen(webSocket: WebSocket, response: Response) {
             reconnectAttempts = 0
             _status.value = VoiceSessionStatus.CONNECTED
-            sendWakewordDetected()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {

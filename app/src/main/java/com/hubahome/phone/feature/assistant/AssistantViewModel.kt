@@ -2,6 +2,7 @@ package com.hubahome.phone.feature.assistant
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hubahome.phone.core.audio.ActivationCuePlayer
 import com.hubahome.phone.core.audio.AudioChunkRecorder
 import com.hubahome.phone.core.audio.AudioOutputPlayer
 import com.hubahome.phone.core.network.IncomingServerEvent
@@ -30,11 +31,14 @@ class AssistantViewModel @Inject constructor(
     private val wakewordDetector: WakewordDetector,
     private val audioChunkRecorder: AudioChunkRecorder,
     private val audioOutputPlayer: AudioOutputPlayer,
+    private val activationCuePlayer: ActivationCuePlayer,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AssistantUiState())
     val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
-    private var chunkId = 0
+    private var captureStartJob: Job? = null
     private var recordStopJob: Job? = null
+    private var pendingWakewordTurn = false
+    private var restartWakewordJob: Job? = null
 
     val sessionStatus: StateFlow<VoiceSessionStatus> = voiceSessionClient.status.stateIn(
         scope = viewModelScope,
@@ -54,9 +58,10 @@ class AssistantViewModel @Inject constructor(
     }
 
     fun disconnect() {
+        finishCapture(sendToServer = false)
         voiceSessionClient.disconnect()
-        stopCapture()
         stopWakeword()
+        updateVoicePhase("Disconnected")
     }
 
     fun reconnect() {
@@ -111,30 +116,65 @@ class AssistantViewModel @Inject constructor(
     fun toggleWakeword(enabled: Boolean) {
         _uiState.update { it.copy(isWakewordEnabled = enabled) }
         if (enabled) {
-            wakewordDetector.start()
+            startWakewordListening()
             addSystemMessage("Wakeword detection enabled")
         } else {
-            wakewordDetector.stop()
+            stopWakeword()
             addSystemMessage("Wakeword detection disabled")
         }
     }
 
     fun startCapture() {
-        if (audioChunkRecorder.isRecording) return
-        chunkId = 0
-        audioChunkRecorder.start { chunkBase64 ->
-            voiceSessionClient.sendAudioChunk(chunkId++, chunkBase64)
+        if (audioChunkRecorder.isRecording || !isSocketReady(sessionStatus.value)) return
+        wakewordDetector.stop()
+        pendingWakewordTurn = false
+        captureStartJob?.cancel()
+        recordStopJob?.cancel()
+        voiceSessionClient.sendWakewordDetected()
+        activationCuePlayer.playReadyCue()
+        updateVoicePhase("Wakeword detected")
+        captureStartJob = viewModelScope.launch {
+            delay(READY_CUE_DELAY_MS)
+            if (!isSocketReady(sessionStatus.value)) return@launch
+            audioChunkRecorder.start()
+            _uiState.update { it.copy(isRecording = true) }
+            updateVoicePhase("Recording command")
+            addSystemMessage("Recording started")
+            recordStopJob = viewModelScope.launch {
+                delay(RECORDING_WINDOW_MS)
+                stopCapture()
+            }
         }
-        _uiState.update { it.copy(isRecording = true) }
-        addSystemMessage("Recording started")
     }
 
     fun stopCapture() {
+        finishCapture(sendToServer = true)
+    }
+
+    private fun finishCapture(sendToServer: Boolean) {
+        captureStartJob?.cancel()
+        recordStopJob?.cancel()
         if (!audioChunkRecorder.isRecording) return
-        audioChunkRecorder.stop()
+        val audioWavBase64 = audioChunkRecorder.stop()
         _uiState.update { it.copy(isRecording = false) }
+        if (!sendToServer) {
+            addSystemMessage("Recording cancelled")
+            return
+        }
+        if (!isSocketReady(sessionStatus.value)) {
+            addSystemMessage("Recording stopped, but socket is disconnected")
+            restartWakewordIfEnabled()
+            return
+        }
+        if (audioWavBase64.isNullOrBlank()) {
+            addSystemMessage("Recording stopped without audio")
+            restartWakewordIfEnabled()
+            return
+        }
+        voiceSessionClient.sendAudioChunk(chunkId = 0, payloadB64 = audioWavBase64)
         voiceSessionClient.sendFinalTranscript("")
-        addSystemMessage("Recording stopped; final_transcript sent")
+        updateVoicePhase("Waiting for server")
+        addSystemMessage("Recording stopped; utterance sent for server STT")
     }
 
     private fun observeSessionStatus() {
@@ -143,8 +183,12 @@ class AssistantViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         sessionStatus = status,
-                        isConnected = status == VoiceSessionStatus.CONNECTED,
+                        isConnected = isSocketReady(status),
                     )
+                }
+                if (status == VoiceSessionStatus.CONNECTED && pendingWakewordTurn) {
+                    pendingWakewordTurn = false
+                    startCapture()
                 }
             }
         }
@@ -168,6 +212,9 @@ class AssistantViewModel @Inject constructor(
             voiceSessionClient.events.collectLatest { event ->
                 when (event) {
                     is IncomingServerEvent.AssistantText -> {
+                        if (event.text == READY_PROMPT_TEXT) {
+                            return@collectLatest
+                        }
                         _uiState.update {
                             it.copy(
                                 messages = it.messages + AssistantMessage(
@@ -177,10 +224,16 @@ class AssistantViewModel @Inject constructor(
                                 lastError = null,
                             )
                         }
+                        updateVoicePhase("Assistant replied")
+                        scheduleWakewordRestart()
                     }
 
                     is IncomingServerEvent.AssistantAudioChunk -> {
-                        audioOutputPlayer.playBase64Wav(event.payloadB64)
+                        restartWakewordJob?.cancel()
+                        updateVoicePhase("Playing response")
+                        audioOutputPlayer.playBase64Wav(event.payloadB64) {
+                            restartWakewordIfEnabled()
+                        }
                         _uiState.update {
                             it.copy(
                                 messages = it.messages + AssistantMessage(
@@ -201,6 +254,8 @@ class AssistantViewModel @Inject constructor(
                                 lastError = event.message,
                             )
                         }
+                        updateVoicePhase("Server error")
+                        restartWakewordIfEnabled()
                     }
 
                     is IncomingServerEvent.Unknown -> {
@@ -225,28 +280,50 @@ class AssistantViewModel @Inject constructor(
                     is WakewordEvent.Detected -> {
                         addSystemMessage("Wakeword detected")
                         if (!uiState.value.isConnected) {
+                            pendingWakewordTurn = true
+                            updateVoicePhase("Connecting to server")
                             connect()
+                            return@collectLatest
                         }
-                        voiceSessionClient.sendWakewordDetected()
                         startCapture()
-                        recordStopJob?.cancel()
-                        recordStopJob = viewModelScope.launch {
-                            delay(RECORDING_WINDOW_MS)
-                            stopCapture()
-                        }
                     }
 
                     is WakewordEvent.Error -> {
                         addSystemMessage("Wakeword error: ${event.message}")
+                        updateVoicePhase("Wakeword error")
                     }
                 }
             }
         }
     }
 
+    private fun startWakewordListening() {
+        restartWakewordJob?.cancel()
+        wakewordDetector.start()
+        updateVoicePhase("Listening for wakeword")
+    }
+
+    private fun scheduleWakewordRestart() {
+        if (!uiState.value.isWakewordEnabled || uiState.value.isRecording) return
+        restartWakewordJob?.cancel()
+        restartWakewordJob = viewModelScope.launch {
+            delay(RESTART_WAKEWORD_DELAY_MS)
+            restartWakewordIfEnabled()
+        }
+    }
+
+    private fun restartWakewordIfEnabled() {
+        if (!uiState.value.isWakewordEnabled || uiState.value.isRecording) return
+        startWakewordListening()
+    }
+
     private fun stopWakeword() {
+        restartWakewordJob?.cancel()
         wakewordDetector.stop()
         _uiState.update { it.copy(isWakewordEnabled = false) }
+        if (!uiState.value.isRecording) {
+            updateVoicePhase("Wakeword disabled")
+        }
     }
 
     private fun addSystemMessage(message: String) {
@@ -260,14 +337,38 @@ class AssistantViewModel @Inject constructor(
         }
     }
 
+    private fun updateVoicePhase(value: String) {
+        _uiState.update { it.copy(voicePhase = value) }
+    }
+
+    private fun isSocketReady(status: VoiceSessionStatus): Boolean {
+        return when (status) {
+            VoiceSessionStatus.CONNECTED,
+            VoiceSessionStatus.LISTENING,
+            VoiceSessionStatus.AWAITING_RESPONSE,
+            VoiceSessionStatus.PLAYING_RESPONSE,
+            -> true
+
+            VoiceSessionStatus.IDLE,
+            VoiceSessionStatus.CONNECTING,
+            VoiceSessionStatus.RETRYING,
+            VoiceSessionStatus.DISCONNECTED,
+            VoiceSessionStatus.ERROR,
+            -> false
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
-        stopCapture()
+        finishCapture(sendToServer = false)
         stopWakeword()
         audioOutputPlayer.stop()
     }
 
     private companion object {
         private const val RECORDING_WINDOW_MS = 5_000L
+        private const val READY_CUE_DELAY_MS = 220L
+        private const val RESTART_WAKEWORD_DELAY_MS = 750L
+        private const val READY_PROMPT_TEXT = "Слушаю, говори команду."
     }
 }

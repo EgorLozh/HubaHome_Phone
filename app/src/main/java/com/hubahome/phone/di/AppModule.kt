@@ -2,6 +2,8 @@ package com.hubahome.phone.di
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.hubahome.phone.core.audio.ActivationCuePlayer
+import com.hubahome.phone.core.audio.AudioTrackActivationCuePlayer
 import com.hubahome.phone.core.audio.AudioChunkRecorder
 import com.hubahome.phone.core.audio.AudioOutputPlayer
 import com.hubahome.phone.core.audio.AudioTrackOutputPlayer
@@ -10,7 +12,7 @@ import com.hubahome.phone.core.network.OkHttpVoiceSessionClient
 import com.hubahome.phone.core.network.VoiceSessionClient
 import com.hubahome.phone.core.settings.ConnectionSettingsStore
 import com.hubahome.phone.core.settings.SharedPrefsConnectionSettingsStore
-import com.hubahome.phone.core.wakeword.SpeechRecognizerWakewordDetector
+import com.hubahome.phone.core.wakeword.OnnxWakewordDetector
 import com.hubahome.phone.core.wakeword.WakewordDetector
 import dagger.Binds
 import dagger.Module
@@ -53,8 +55,14 @@ abstract class AppBindingsModule {
 
     @Binds
     @Singleton
+    abstract fun bindActivationCuePlayer(
+        implementation: AudioTrackActivationCuePlayer
+    ): ActivationCuePlayer
+
+    @Binds
+    @Singleton
     abstract fun bindWakewordDetector(
-        implementation: SpeechRecognizerWakewordDetector
+        implementation: OnnxWakewordDetector
     ): WakewordDetector
 }
 
